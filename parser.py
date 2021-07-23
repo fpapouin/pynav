@@ -1,7 +1,9 @@
+import os
 import struct
 import json
 from typing import List
 from dataclasses import dataclass, field, is_dataclass, asdict
+from math import dist
 
 
 class EnhancedJSONEncoder(json.JSONEncoder):
@@ -172,7 +174,7 @@ class Nav:
 
 
 def parse(mapname):
-    n = Nav(f'{mapname}.nav')
+    n = Nav(os.path.join('nav', f'{mapname}.nav'))
 
     d = {}
     d['feedface'] = 0x00
@@ -287,6 +289,7 @@ def parse(mapname):
         printd(f'    {place_id=}')
         for p in hd.places:
             if p.id == place_id:
+                a.place_id = place_id
                 p.areas.append(a)
                 place_id = 0
             if place_id == 0:
@@ -355,7 +358,7 @@ def parse(mapname):
         l.length = n.rf(add)
         add += 0x04
         l.direction = n.rb(add)
-        add += 0x04 # not 0x01 for ladder
+        add += 0x04  # not 0x01 for ladder
         l.direction = ['NavLadderDirectionUp', 'NavLadderDirectionDown', 'NavLadderDirectionMax', 'NavLadderDirectionMax'][l.direction]
 
         l.top_forward_area_id = n.rui(add)
@@ -379,30 +382,130 @@ def parse(mapname):
         l.bottom_area = l.bottom_area_id
         hd.ladders.append(l)
 
-    with open(f'{mapname}.json', 'w') as text_file:
+    with open(os.path.join('parsed', f'{mapname}.json'), 'w') as text_file:
         result = json.dumps(hd, indent=4, cls=EnhancedJSONEncoder)
         print(result, file=text_file)
+
 
 def printd(s):
     # print(s)
     pass
 
 
+def parse_small(mapname):
+    def id_to_uid(i: int):
+        i += 255
+        return f'{i:02x}'.upper()
+
+    with open(os.path.join('parsed', f'{mapname}.json')) as json_file:
+        nav_dict = json.load(json_file)
+
+    small = {}
+
+    all_id = []
+    for p in nav_dict['places']:
+        for a in p['areas']:
+            all_id.append(a['id'])
+
+    for p in nav_dict['places']:
+        for a in p['areas']:
+            area_key = a['id']
+            x = int((a['north_west']['x']+a['south_east']['x'])/2)
+            y = int((a['north_west']['y']+a['south_east']['y'])/2)
+            z = int((a['north_west']['z']+a['south_east']['z'])/2) + 32
+            uid = id_to_uid(area_key)
+            small[uid] = {}
+            small[uid]['pos'] = [x, y, z]
+            small[uid]['child'] = []
+            small[uid]['id'] = area_key
+            for c in a['connections']:
+                con_key = c['target_area']
+                con_uid = id_to_uid(con_key)
+                if con_key in all_id:
+                    small[uid]['child'].append(con_uid)
+
+    import re
+    with open(os.path.join('small', f'{mapname}.json'), 'w') as text_file:
+        result = json.dumps(small, indent=4)
+        result = re.sub(r'(\[[^]]+\])', lambda m: m.group(1).replace('\n', '').replace(' ', '').replace(',', ', '), result)
+        print(result, file=text_file)
+
 
 def main():
-    import os
     import glob
     import shutil
     nav_path = os.path.join(r'C:\Steam\steamapps\common\Counter-Strike Global Offensive\csgo\maps', '*.nav')
     for f in glob.glob(nav_path):
         basename = os.path.basename(f)
-        if os.path.isfile(basename):
-            os.remove(basename)
-        shutil.copy(f, '.')
+        navpath = os.path.join('nav', basename)
+        if os.path.isfile(navpath):
+            os.remove(navpath)
+        shutil.copy(f, navpath)
         basename = basename.replace('.nav', '')
-        parse(basename)
-    exit(0)
+        # parse(basename)
+        parse_small(basename)
+
+
+def test():
+    def nav(mapname):
+        import os
+        nav_dict = {}
+        if os.path.exists(f'C:/Users/Shadow/Documents/pynav/{mapname}_small.json'):
+            with open(f'C:/Users/Shadow/Documents/pynav/{mapname}_small.json') as json_file:
+                nav_dict = json.load(json_file)
+        return nav_dict
+
+    def get_heuristic(node: dict):
+        return node['heuristic']
+
+    def in_open_with_lower_cost(open, node: dict):
+        for n in open:
+            if n['id'] == node['id']:
+                if n['cost'] < node['cost']:
+                    return True
+        return False
+
+    def in_closed(closed, node: dict):
+        for n in closed:
+            if n['id'] == node['id']:
+                return True
+        return False
+
+    def short_path(graph: dict, start_node: dict, objectif_node: dict):  # A*
+        import copy
+        closed = []
+        open = []
+        open.append(copy.deepcopy(start_node))
+        while open != []:
+            open.sort(key=get_heuristic)
+            current_node = open.pop(0)
+            if current_node['center'] == objectif_node['center']:
+                closed.append(current_node)
+                return closed
+            else:
+                for con_id in current_node['con_id']:
+                    current_sub_node = copy.deepcopy(graph['areas'][str(con_id)])
+                    if not (in_closed(closed, current_sub_node) or in_open_with_lower_cost(open, current_sub_node)):
+                        current_sub_node['cost'] = current_node['cost'] + 1
+                        current_sub_node['heuristic'] = current_sub_node['cost'] + dist(current_sub_node['center'], objectif_node['center'])
+                        open.append(current_sub_node)
+                closed.append(current_node)
+        return []  # Error
+
+    nav3d = nav('de_dust2')
+    start_node = nav3d['areas'][str(nav3d['LongA'])]
+    objectif_node = nav3d['areas'][str(nav3d['BombsiteB'])]
+    print(start_node)
+    print(objectif_node)
+    print(' ')
+
+    result = short_path(nav3d, start_node, objectif_node)
+    print(len(result))
+    print(result[0])
+    print(result[-1])
 
 
 if __name__ == '__main__':
-    main()
+    # main()
+    parse_small('de_shortnuke')
+    # test()
